@@ -1,11 +1,16 @@
 -- ====================================================================
--- PREMONITION ENGINE v108.5.0 - DELTA PREMIUM EDITION (HOOK EDITION)
+-- PREMONITION ENGINE v109.0.0 - DELTA PREMIUM EDITION (HOOK EDITION)
 -- ====================================================================
 
 if not game:IsLoaded() then
     game.Loaded:Wait()
 end
 task.wait(1)
+
+-- Localização de Funções e Variáveis Globais (Otimização Luau VM para Ganho de FPS)
+local clamp, math_sin, math_cos, math_exp, math_pow, math_acos, math_sqrt, math_rad, math_tan, math_abs, math_huge = math.clamp, math.sin, math.cos, math.exp, math.pow, math.acos, math.sqrt, math.rad, math.tan, math.abs, math.huge
+local Vector3_zero, Vector2_new, CFrame_new, CFrame_Angles = Vector3.zero, Vector2.new, CFrame.new, CFrame.Angles
+local os_clock = os.clock
 
 -- Gerenciamento de conexões obsoletas para evitar vazamento de memória (Memory Leak)
 local ENV = (getgenv and getgenv()) or _G
@@ -35,6 +40,8 @@ local RunService = game:GetService("RunService")
 local CollectionService = game:GetService("CollectionService")
 local Workspace = game:GetService("Workspace")
 local Camera = Workspace.CurrentCamera or Workspace:WaitForChild("Camera")
+
+local WorldToViewportPoint = Camera.WorldToViewportPoint
 
 local TARGET_TAG = "Premonition_ActiveTarget"
 
@@ -72,7 +79,6 @@ local Settings = {
     AntiLagFiltering = false,
     BallisticCorrection = false,
     
-    -- Valores Base (Serão sobrescritos dinamicamente pelo Hook se calibrado)
     MuzzleVelocity = 1000,
     BulletGravity = 196.2,
     AutoCalibrateUniversal = true,
@@ -91,14 +97,17 @@ local Settings = {
     AdaptiveFovEnabled = false,
     AdaptiveFovMultiplier = 0.5,
 
-    -- ==================== UPGRADE: CORE RAGE ENGINE CONFIGS ====================
+    -- ==================== UPGRADE CONTROLES DO CORE RAGE ====================
     RageEnabled = false,
     RageHitbox = "Head",
     RageWallCheck = false,
-    RageInstantSnapping = false, -- Falso por padrão para usar a nova cinemática fluida
-    RageSmoothness = 3.5,        -- Controla a força do arrasto hidrodinâmico e Bézier
-    RageStabilizer = true,       -- Ativa o Filtro Kalman contra Lag/Jitter
-    RageMaxDistance = 2000
+    RageInstantSnapping = false,
+    RageSmoothness = 3.5,        
+    RageMaxDistance = 2000,
+    
+    RageUseFriction = true,     
+    RageUseBezier = true,       
+    RageStabilizer = true       
 }
 
 -- ==================== SISTEMA DE MEMÓRIA DA ENGINE ====================
@@ -106,36 +115,34 @@ local TargetMotionCache = {}
 local CurrentTarget = nil
 local TargetPart = nil
 
--- Memória dedicada do motor Core Rage (Vetores físicos e históricos do Kalman)
 local CoreRageTarget = nil
-local RageAngularVelocity = Vector3.zero
 local RageKalmanHistory = {}
 
 -- ==================== HOOK UNIVERSAL DE AUTO-CALIBRAÇÃO REAL ====================
 local LastTriggerTime = 0
 AddConnection(UserInputService.InputBegan:Connect(function(input, processed)
     if not processed and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
-        LastTriggerTime = os.clock()
+        LastTriggerTime = os_clock()
     end
 end))
 
 local function TrackProjectileVelocity(part)
     local lastPos = part.Position
-    local startTime = os.clock()
+    local startTime = os_clock()
     task.wait(0.03)
     
     if part and part.Parent then
         local currentPos = part.Position
         local deltaPos = (currentPos - lastPos).Magnitude
-        local deltaTime = os.clock() - startTime
+        local deltaTime = os_clock() - startTime
         
         if deltaTime > 0 and deltaPos > 5 then
             local realVelocity = deltaPos / deltaTime
             if realVelocity > 50 and realVelocity < 8000 then
                 Settings.MuzzleVelocity = realVelocity
                 local velocityY = part.AssemblyLinearVelocity and part.AssemblyLinearVelocity.Y
-                if velocityY and math.abs(velocityY) > 1 then
-                    Settings.BulletGravity = math.abs(Workspace.Gravity)
+                if velocityY and math_abs(velocityY) > 1 then
+                    Settings.BulletGravity = math_abs(Workspace.Gravity)
                 end
             end
         end
@@ -144,7 +151,7 @@ end
 
 local function HookWorkspaceContainer(container)
     AddConnection(container.ChildAdded:Connect(function(child)
-        if not Settings.AutoCalibrateUniversal or (os.clock() - LastTriggerTime > 0.3) then return end
+        if not Settings.AutoCalibrateUniversal or (os_clock() - LastTriggerTime > 0.3) then return end
         if child:IsA("BasePart") or child:IsA("MeshPart") then
             local myCharacter = LocalPlayer.Character
             if myCharacter then
@@ -164,22 +171,23 @@ if Workspace:FindFirstChild("Debris") then HookWorkspaceContainer(Workspace.Debr
 -- ==================== MATEMÁTICA VETORIAL E TELA ====================
 local function GetTrueScreenCenter()
     Camera = Workspace.CurrentCamera
-    if not Camera then return Vector2.new(0, 0) end
-    return Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    if not Camera then return Vector2_new(0, 0) end
+    WorldToViewportPoint = Camera.WorldToViewportPoint
+    return Vector2_new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
 end
 local ScreenCenter = GetTrueScreenCenter()
 
 local function CalculateAngularRadius(degrees)
     Camera = Workspace.CurrentCamera
     if not Camera then return 55 end
-    return (math.tan(math.rad(degrees) / 2) / math.tan(math.rad(Camera.FieldOfView) / 2)) * (Camera.ViewportSize.Y / 2) 
+    return (math_tan(math_rad(degrees) / 2) / math_tan(math_rad(Camera.FieldOfView) / 2)) * (Camera.ViewportSize.Y / 2) 
 end
 
 local function CalculateAdaptiveFov(baseFov, targetPart, myRoot)
     if not Settings.AdaptiveFovEnabled or not targetPart or not myRoot then return baseFov end
     local distance = (targetPart.Position - myRoot.Position).Magnitude
-    local speed = (targetPart.AssemblyLinearVelocity or Vector3.zero).Magnitude
-    return baseFov * math.clamp(1 + (math.clamp(distance / 100, 0, 1) + math.clamp(speed / 50, 0, 1)) * Settings.AdaptiveFovMultiplier, 0.5, 2.5) 
+    local speed = (targetPart.AssemblyLinearVelocity or Vector3_zero).Magnitude
+    return baseFov * clamp(1 + (clamp(distance / 100, 0, 1) + clamp(speed / 50, 0, 1)) * Settings.AdaptiveFovMultiplier, 0.5, 2.5) 
 end
 
 local function validateCharacter(char)
@@ -189,11 +197,10 @@ local function validateCharacter(char)
 end
 
 local function CleanMotionCache()
-    local currentTime = os.clock()
+    local currentTime = os_clock()
     for key, data in pairs(TargetMotionCache) do
         if currentTime - data.lastUpdate > 2.0 then TargetMotionCache[key] = nil end
     end
-    -- Limpa histórico Kalman órfão
     for id, _ in pairs(RageKalmanHistory) do
         if not Workspace:FindFirstChild(id) then RageKalmanHistory[id] = nil end
     end
@@ -208,27 +215,27 @@ local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "DeltaPremium_FinalRelease"; ScreenGui.ResetOnSpawn = false; ScreenGui.IgnoreGuiInset = true; ScreenGui.DisplayOrder = 999; ScreenGui.Parent = CoreGui
 
 local FOVCircle = Instance.new("Frame")
-FOVCircle.Name = "AutonomousFOV"; FOVCircle.AnchorPoint = Vector2.new(0.5, 0.5); FOVCircle.BackgroundTransparency = 1; FOVCircle.ZIndex = 10; FOVCircle.Parent = ScreenGui
+FOVCircle.Name = "AutonomousFOV"; FOVCircle.AnchorPoint = Vector2_new(0.5, 0.5); FOVCircle.BackgroundTransparency = 1; FOVCircle.ZIndex = 10; FOVCircle.Parent = ScreenGui
 local Stroke = Instance.new("UIStroke", FOVCircle); Stroke.Thickness = 1.5; Stroke.Transparency = 0.2
 Instance.new("UICorner", FOVCircle).CornerRadius = UDim.new(1, 0)
 
 local FlickFOVCircle = Instance.new("Frame")
-FlickFOVCircle.Name = "FlickFOV"; FlickFOVCircle.AnchorPoint = Vector2.new(0.5, 0.5); FlickFOVCircle.BackgroundTransparency = 1; FlickFOVCircle.ZIndex = 9; FlickFOVCircle.Parent = ScreenGui
+FlickFOVCircle.Name = "FlickFOV"; FlickFOVCircle.AnchorPoint = Vector2_new(0.5, 0.5); FlickFOVCircle.BackgroundTransparency = 1; FlickFOVCircle.ZIndex = 9; FlickFOVCircle.Parent = ScreenGui
 local FlickStroke = Instance.new("UIStroke", FlickFOVCircle); FlickStroke.Thickness = 1.5; FlickStroke.Transparency = 0.2
 Instance.new("UICorner", FlickFOVCircle).CornerRadius = UDim.new(1, 0)
 
 local CrosshairBase = Instance.new("Frame")
-CrosshairBase.Name = "CrosshairContainer"; CrosshairBase.Size = UDim2.new(0, 100, 0, 100); CrosshairBase.AnchorPoint = Vector2.new(0.5, 0.5); CrosshairBase.BackgroundTransparency = 1; CrosshairBase.ZIndex = 12; CrosshairBase.Parent = ScreenGui
+CrosshairBase.Name = "CrosshairContainer"; CrosshairBase.Size = UDim2.new(0, 100, 0, 100); CrosshairBase.AnchorPoint = Vector2_new(0.5, 0.5); CrosshairBase.BackgroundTransparency = 1; CrosshairBase.ZIndex = 12; CrosshairBase.Parent = ScreenGui
 local CrosshairObjects = { Lines = {} }
 
 local function BuildCrosshairInstances()
     CrosshairBase:ClearAllChildren()
     local dot = Instance.new("Frame")
-    dot.AnchorPoint = Vector2.new(0.5, 0.5); dot.BorderSizePixel = 0; dot.ZIndex = 3; dot.Parent = CrosshairBase
+    dot.AnchorPoint = Vector2_new(0.5, 0.5); dot.BorderSizePixel = 0; dot.ZIndex = 3; dot.Parent = CrosshairBase
     Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
     CrosshairObjects.Dot = dot
     for i = 1, 4 do
-        local arm = Instance.new("Frame"); arm.BorderSizePixel = 0; arm.AnchorPoint = Vector2.new(0.5, 0.5); arm.ZIndex = 3; arm.Parent = CrosshairBase
+        local arm = Instance.new("Frame"); arm.BorderSizePixel = 0; arm.AnchorPoint = Vector2_new(0.5, 0.5); arm.ZIndex = 3; arm.Parent = CrosshairBase
         CrosshairObjects.Lines[i] = arm
     end
 end
@@ -237,41 +244,63 @@ BuildCrosshairInstances()
 local SnapLeft = Instance.new("TextLabel"); SnapLeft.BackgroundTransparency = 1; SnapLeft.Text = "["; SnapLeft.Font = Enum.Font.GothamBold; SnapLeft.TextSize = 18; SnapLeft.TextColor3 = Color3.fromRGB(185, 28, 28); SnapLeft.Visible = false; SnapLeft.ZIndex = 2; SnapLeft.Parent = ScreenGui
 local SnapRight = Instance.new("TextLabel"); SnapRight.BackgroundTransparency = 1; SnapRight.Text = "]"; SnapRight.Font = Enum.Font.GothamBold; SnapRight.TextSize = 18; SnapRight.TextColor3 = Color3.fromRGB(185, 28, 28); SnapRight.Visible = false; SnapRight.ZIndex = 2; SnapRight.Parent = ScreenGui
 
--- ==================== CÁLCULO DE BALÍSTICA E PREDIÇÃO ====================
+-- ==================== EQUAÇÃO QUADRÁTICA DE INTERCEPTAÇÃO BALÍSTICA ====================
+local function GetProjectileIntercept(origin, targetPos, targetVelocity, projectileSpeed)
+    local displacement = targetPos - origin
+    local a = targetVelocity:Dot(targetVelocity) - (projectileSpeed * projectileSpeed)
+    local b = 2 * displacement:Dot(targetVelocity)
+    local c = displacement:Dot(displacement)
+    
+    local discriminant = (b * b) - (4 * a * c)
+    if discriminant < 0 then return targetPos, 0.03 end 
+    
+    local rootDiscriminant = math_sqrt(discriminant)
+    local t1 = (-b + rootDiscriminant) / (2 * a)
+    local t2 = (-b - rootDiscriminant) / (2 * a)
+    local t = math.max(t1, t2)
+    if t < 0 then t = math.min(t1, t2) end
+    if t < 0 then t = 0.03 end
+    
+    return targetPos + (targetVelocity * t), t
+end
+
 local function CalculateAdvancedPrediction(targetPart, deltaTime)
     if not targetPart or not Settings.MovementPrediction then return targetPart.Position end
     local currentPos = targetPart.Position
-    local velocity = targetPart.AssemblyLinearVelocity or Vector3.zero
+    local velocity = targetPart.AssemblyLinearVelocity or Vector3_zero
     local myRoot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
     if not myRoot or (Settings.AntiLagFiltering and velocity.Magnitude > 120) then return currentPos end
 
-    local ping = 0.03
-    pcall(function() ping = game:GetService("Stats").Network.ServerToClientPing:GetValue() / 1000 end)
-    ping = math.clamp(ping, 0.005, 0.15)
-    local predictedPos = currentPos + (velocity * (ping * (Settings.PredictStrength / 50)))
+    local origin = Camera.CFrame.Position
+    local predictedPos = currentPos
+    local travelTime = 0.03
 
     if Settings.BallisticCorrection then
-        local distance = (currentPos - myRoot.Position).Magnitude
-        local travelTime = distance / Settings.MuzzleVelocity
-        predictedPos = predictedPos + Vector3.new(0, 0.5 * Settings.BulletGravity * (travelTime ^ 2), 0)
+        predictedPos, travelTime = GetProjectileIntercept(origin, currentPos, velocity, Settings.MuzzleVelocity)
+        predictedPos = predictedPos + Vector3.new(0, 0.5 * Settings.BulletGravity * (travelTime * travelTime), 0)
+    else
+        local ping = 0.03
+        pcall(function() ping = game:GetService("Stats").Network.ServerToClientPing:GetValue() / 1000 end)
+        ping = clamp(ping, 0.005, 0.15)
+        predictedPos = currentPos + (velocity * (ping * (Settings.PredictStrength / 50)))
     end
     return predictedPos
 end
 
--- MATEMÁTICA AVANÇADA DO NOVO CORE RAGE: FILTRO KALMAN & BÉZIER CÚBICA
+-- FILTRO KALMAN FILTRADOR DO RAGE
 local function ProcessKalmanRage(part)
-    if not part then return Vector3.zero end
+    if not part then return Vector3_zero end
     local id = part.Name .. "_" .. tostring(part.Parent)
     local currentPos = part.Position
     
+    if not Settings.RageStabilizer then return currentPos end
     if not RageKalmanHistory[id] then
-        RageKalmanHistory[id] = { pos = currentPos, vel = Vector3.zero }
+        RageKalmanHistory[id] = { pos = currentPos, vel = Vector3_zero }
         return currentPos
     end
     
     local lastData = RageKalmanHistory[id]
-    -- Constante de ganho adaptativo contra Jitter/Desaceleração de Rede
-    local kGain = Settings.RageStabilizer and 0.35 or 1.0
+    local kGain = 0.35 
     local estimatedPos = lastData.pos + (lastData.vel * 0.016)
     local filteredPos = estimatedPos + kGain * (currentPos - estimatedPos)
     
@@ -282,7 +311,6 @@ local function ProcessKalmanRage(part)
 end
 
 local function GetBezierPoint(p0, p1, p2, t)
-    -- Curva de Bézier Cúbica Simplificada para suavização de transição angular
     local l1 = p0:Lerp(p1, t)
     local l2 = p1:Lerp(p2, t)
     return l1:Lerp(l2, t)
@@ -340,37 +368,46 @@ end
 local function UpdateExpandedHitboxes(character, size)
     if not character or not character.Parent then return end
     
-    for _, partName in ipairs({"Head", "UpperTorso", "LowerTorso", "HumanoidRootPart"}) do
-        local part = character:FindFirstChild(partName)
-        if part then
-            local oldHitbox = part:FindFirstChild("ExpandedHitbox")
+    if not Settings.HitboxExpander or size <= 0 then 
+        for _, partName in ipairs({"Head", "UpperTorso", "LowerTorso", "HumanoidRootPart"}) do
+            local part = character:FindFirstChild(partName)
+            local oldHitbox = part and part:FindFirstChild("ExpandedHitbox")
             if oldHitbox then ReleaseHitbox(oldHitbox) end
         end
+        return 
     end
-
-    if not Settings.HitboxExpander or size <= 0 then return end
 
     for _, partName in ipairs({"Head", "UpperTorso", "LowerTorso", "HumanoidRootPart"}) do
         local part = character:FindFirstChild(partName)
         if part and part:IsA("BasePart") then
-            local hitbox = GetHitboxFromPool()
+            local hitbox = part:FindFirstChild("ExpandedHitbox")
+            
+            if not hitbox then
+                hitbox = GetHitboxFromPool()
+                if hitbox then
+                    hitbox.Name = "ExpandedHitbox"
+                    local weld = Instance.new("Weld")
+                    weld.Part0 = part
+                    weld.Part1 = hitbox
+                    weld.C0 = CFrame_new(0, 0, 0)
+                    weld.Parent = hitbox -- CORRIGIDO: Vinculado à própria hitbox para evitar vazamentos e falhas de replicação física
+                    hitbox.Parent = part
+                end
+            end
+            
             if hitbox then
-                hitbox.Name = "ExpandedHitbox"
-                hitbox.Size = part.Size * (1 + (size / 3.5))
-                local weld = Instance.new("Weld")
-                weld.Part0 = part; weld.Part1 = hitbox; weld.C0 = CFrame.new(0, 0, 0); weld.Parent = weld
-                hitbox.Parent = part
+                hitbox.Size = part.Size * (1 + (size / 3.5)) -- Apenas altera o tamanho dinamicamente evitando spikes de GC
             end
         end
     end
 end
 
--- ==================== LÓGICA DO WALLCHECK ====================
+-- LÓGICA DO WALLCHECK CONVENCIONAL
 local function ScanDynamicExposedMassa(character)
     if not character then return nil end
     local origin = Camera.CFrame.Position
     local boneCandidates = Settings.MultiBoneScan and {Settings.Hitbox, "Head", "UpperTorso", "HumanoidRootPart"} or {Settings.Hitbox}
-    local bestPart, minDist = nil, math.huge
+    local bestPart, minDist = nil, math_huge
     local screenCenter = GetTrueScreenCenter()
 
     for _, boneName in ipairs(boneCandidates) do
@@ -409,9 +446,9 @@ local function ScanDynamicExposedMassa(character)
 
             if hitVisible then
                 local aimPart = (Settings.HitboxExpander and Settings.HitboxSize > 0 and hitboxPart) or part
-                local screenPos, onScreen = Camera:WorldToViewportPoint(aimPart.Position)
+                local screenPos, onScreen = WorldToViewportPoint(Camera, aimPart.Position)
                 if onScreen then
-                    local dist = (Vector2.new(screenPos.X, screenPos.Y) - screenCenter).Magnitude
+                    local dist = (Vector2_new(screenPos.X, screenPos.Y) - screenCenter).Magnitude
                     if dist < minDist then minDist = dist; bestPart = aimPart end
                 end
             end
@@ -590,12 +627,12 @@ Instance.new("UICorner", FovPreviewBox).CornerRadius = UDim.new(0, 4)
 Instance.new("UIStroke", FovPreviewBox).Color = Color3.fromRGB(185, 28, 28)
 
 local FovSimCircle = Instance.new("Frame")
-FovSimCircle.AnchorPoint = Vector2.new(0.5, 0.5); FovSimCircle.Position = UDim2.new(0.5, 0, 0.5, 0); FovSimCircle.BackgroundTransparency = 1; FovSimCircle.Parent = FovPreviewBox
+FovSimCircle.AnchorPoint = Vector2_new(0.5, 0.5); FovSimCircle.Position = UDim2.new(0.5, 0, 0.5, 0); FovSimCircle.BackgroundTransparency = 1; FovSimCircle.Parent = FovPreviewBox
 local FovSimStroke = Instance.new("UIStroke", FovSimCircle); FovSimStroke.Thickness = 1.5; FovSimStroke.Color = Color3.fromRGB(0, 180, 255)
 Instance.new("UICorner", FovSimCircle).CornerRadius = UDim.new(1, 0)
 
 local FlickSimCircle = Instance.new("Frame")
-FlickSimCircle.AnchorPoint = Vector2.new(0.5, 0.5); FlickSimCircle.Position = UDim2.new(0.5, 0.5, 0.5, 0); FlickSimCircle.BackgroundTransparency = 1; FlickSimCircle.Parent = FovPreviewBox
+FlickSimCircle.AnchorPoint = Vector2_new(0.5, 0.5); FlickSimCircle.Position = UDim2.new(0.5, 0.5, 0.5, 0); FlickSimCircle.BackgroundTransparency = 1; FlickSimCircle.Parent = FovPreviewBox
 local FlickSimStroke = Instance.new("UIStroke", FlickSimCircle); FlickSimStroke.Thickness = 1.5; FlickSimStroke.Color = Color3.fromRGB(255, 80, 80)
 Instance.new("UICorner", FlickSimCircle).CornerRadius = UDim.new(1, 0)
 
@@ -604,10 +641,10 @@ CrossPreviewBox.Size = UDim2.new(0.95, 0, 0, 70); CrossPreviewBox.BackgroundColo
 Instance.new("UICorner", CrossPreviewBox).CornerRadius = UDim.new(0, 4)
 local CrossSimCenter = Instance.new("Frame")
 CrossSimCenter.Position = UDim2.new(0.5, 0, 0.5, 0); CrossSimCenter.BackgroundTransparency = 1; CrossSimCenter.Parent = CrossPreviewBox
-local SimDot = Instance.new("Frame"); SimDot.AnchorPoint = Vector2.new(0.5, 0.5); SimDot.BorderSizePixel = 0; SimDot.Parent = CrossSimCenter
+local SimDot = Instance.new("Frame"); SimDot.AnchorPoint = Vector2_new(0.5, 0.5); SimDot.BorderSizePixel = 0; SimDot.Parent = CrossSimCenter
 Instance.new("UICorner", SimDot).CornerRadius = UDim.new(1, 0)
 local SimLines = {}
-for i = 1, 4 do local arm = Instance.new("Frame"); arm.BorderSizePixel = 0; arm.AnchorPoint = Vector2.new(0.5, 0.5); arm.Parent = CrossSimCenter; SimLines[i] = arm end
+for i = 1, 4 do local arm = Instance.new("Frame"); arm.BorderSizePixel = 0; arm.AnchorPoint = Vector2_new(0.5, 0.5); arm.Parent = CrossSimCenter; SimLines[i] = arm end
 
 local HitboxPreviewBox = Instance.new("CanvasGroup")
 HitboxPreviewBox.Size = UDim2.new(0.95, 0, 0, 100); HitboxPreviewBox.BackgroundColor3 = Color3.fromRGB(20, 20, 24); HitboxPreviewBox.Parent = Paginas["Hitbox"].Preview
@@ -631,9 +668,9 @@ end
 
 local currentAngle = 25
 local function UpdateCamera3D()
-    local rad = math.rad(currentAngle)
+    local rad = math_rad(currentAngle)
     local dDist = 6.5 + (Settings.HitboxSize * 0.8)
-    ViewCam.CFrame = CFrame.new(Vector3.new(dDist * math.sin(rad), 0.8, dDist * math.cos(rad)), Vector3.new(0, 0.2, 0)) end
+    ViewCam.CFrame = CFrame_new(Vector3.new(dDist * math_sin(rad), 0.8, dDist * math_cos(rad)), Vector3.new(0, 0.2, 0)) end
 
 -- ==================== CRIADORES DE COMPONENTES DE UI ====================
 local function AddSectionSeparator(text, parentCol)
@@ -684,7 +721,7 @@ local function AddSlider(text, min, max, default, parentCol, descText, callback)
 
     local active = false
     local function processScale(input)
-        local scale = math.clamp((input.Position.X - Track.AbsolutePosition.X) / Track.AbsoluteSize.X, 0, 1)
+        local scale = clamp((input.Position.X - Track.AbsolutePosition.X) / Track.AbsoluteSize.X, 0, 1)
         Fill.Size = UDim2.new(scale, 0, 1, 0)
         local value = math.floor((min + (max - min) * scale) * 10) / 10
         Label.Text = text .. ": " .. tostring(value)
@@ -808,15 +845,18 @@ AddToggle("Compensar Queda", Settings.BallisticCorrection, ARight, "Ajusta arco 
 AddToggle("Auto-Calibração Real", Settings.AutoCalibrateUniversal, ARight, "Sonda o Workspace em tempo real.", function(v) Settings.AutoCalibrateUniversal = v end)
 AddSlider("Velocidade Manual", 100, 4000, Settings.MuzzleVelocity, ARight, "Usado se Auto-Calibração estiver OFF.", function(v) Settings.MuzzleVelocity = v end)
 
--- ==================== INJEÇÃO EXCLUSIVA: CORE RAGE ULTRA CINEMATIC UPGRADE ====================
 AddSectionSeparator("CORE RAGE ENGINE", ALeft)
-AddToggle("Aimbot Rage", Settings.RageEnabled, ALeft, "Ativa travamento agressivo sem FOV.", function(v) Settings.RageEnabled = v end)
+AddToggle("Aimbot Rage", Settings.RageEnabled, ALeft, "Ativa travamento agressivo respeitando FOV.", function(v) Settings.RageEnabled = v end)
 AddSelector("Rage Hitbox", {"Head", "HumanoidRootPart", "UpperTorso"}, Settings.RageHitbox, ALeft, "Osso focado pelo motor Rage.", function(v) Settings.RageHitbox = v end)
 AddToggle("Rage Wall Check", Settings.RageWallCheck, ALeft, "Verifica paredes para o modo Rage.", function(v) Settings.RageWallCheck = v end)
-AddToggle("Instant Snap", Settings.RageInstantSnapping, ALeft, "Ignora suavidade física e teleporta a mira.", function(v) Settings.RageInstantSnapping = v end)
-AddSlider("Cinematic Smooth", 1.0, 10.0, Settings.RageSmoothness, ALeft, "Suavidade física baseada em Bézier/Arrasto.", function(v) Settings.RageSmoothness = v end)
-AddToggle("Estabilizador Kalman", Settings.RageStabilizer, ALeft, "Neutraliza o Jitter e Lag de rede do inimigo.", function(v) Settings.RageStabilizer = v end)
+AddToggle("Instant Snap", Settings.RageInstantSnapping, ALeft, "Teleporta instantaneamente ignorando a física.", function(v) Settings.RageInstantSnapping = v end)
+AddSlider("Cinematic Smooth", 1.0, 10.0, Settings.RageSmoothness, ALeft, "Suavidade base das mecânicas físicas.", function(v) Settings.RageSmoothness = v end)
 AddSlider("Alcance Máximo", 100, 5000, Settings.RageMaxDistance, ALeft, "Distância máxima operacional.", function(v) Settings.RageMaxDistance = v end)
+
+AddSectionSeparator("MÓDULOS DE RAGE CINEMÁTICO", ARight)
+AddToggle("Arrasto Hidrodinâmico", Settings.RageUseFriction, ARight, "Aplica física de fricção contínua e pesada.", function(v) Settings.RageUseFriction = v end)
+AddToggle("Curva de Bézier", Settings.RageUseBezier, ARight, "Suavização orgânica de aceleração de mira.", function(v) Settings.RageUseBezier = v end)
+AddToggle("Estabilizador Kalman", Settings.RageStabilizer, ARight, "Limpa o Jitter e Lag de rede da posição do inimigo.", function(v) Settings.RageStabilizer = v end)
 
 local LLeft, LRight = Paginas["Lock"].Left, Paginas["Lock"].Right
 AddSectionSeparator("TRAVA MAGNÉTICA", LLeft)
@@ -843,7 +883,7 @@ AddSectionSeparator("RETÍCULA CENTRAL", CLeft)
 AddToggle("Ativar Crosshair", Settings.CrosshairEnabled, CLeft, "Desenha sobreposição estável.", function(v) Settings.CrosshairEnabled = v; UpdateCrosshairVisuals(); RedrawCrosshairPreview() end)
 AddSelector("Geometria", {"Padrão", "Ponto", "X"}, Settings.CrosshairType, CLeft, "Tipo estrutural.", function(v) Settings.CrosshairType = v; UpdateCrosshairVisuals(); RedrawCrosshairPreview() end)
 AddSlider("Tamanho Protetor", 2, 40, Settings.CrosshairSize, CLeft, "Comprimento das linhas.", function(v) Settings.CrosshairSize = v; UpdateCrosshairVisuals(); RedrawCrosshairPreview() end)
-AddSlider("Espaçamento (Gap)", 0, 20, Settings.CrosshairGap, CLeft, "Abertura central.", function(v) Settings.CrosshairGap = v; UpdateCrosshairVisuals(); RedrawCrosshairPreview() end)
+AddSlider("Espaçamento (Gap)", 0, 20, Settings.CrosshairGap, CLeft, "Abertura central.", function(v) Settings.CrosshairSize = v; UpdateCrosshairVisuals(); RedrawCrosshairPreview() end)
 AddSectionSeparator("MARCADORES", CRight)
 AddToggle("Snap Markers", Settings.SnapMarkers, CRight, "Coloca brackets [] ao redor do alvo.", function(v) Settings.SnapMarkers = v end)
 
@@ -886,14 +926,14 @@ local FlickActiveThisFrame, LastFlickTime = false, 0
 AddConnection(UserInputService.InputChanged:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
         TouchVelocity2D = input.Delta.Magnitude
-        DynamicUserWeight = TouchVelocity2D > 1.5 and math.clamp(1.0 - (TouchVelocity2D / Settings.BreakoutForce), 0.05, 1.0) or 1.0
+        DynamicUserWeight = TouchVelocity2D > 1.5 and clamp(1.0 - (TouchVelocity2D / Settings.BreakoutForce), 0.05, 1.0) or 1.0
         if TouchVelocity2D > Settings.BreakoutForce then
             EscapeCooldown = 0.25
             if not Settings.StickyLock then CurrentTarget = nil; TargetPart = nil end
         end
     end end))
 
--- SCANNER ASSÍNCRONO DE ALVOS (OTIMIZADO COM PRÉ-FILTRO DE DISTÂNCIA VETORIAL)
+-- SCANNER DE ALVOS (RAGE AGORA VALIDA O RAIO DO FOV RIGOROSAMENTE)
 task.spawn(function()
     local fc = 0
     while ENV.PremonitionLoopActive do
@@ -905,11 +945,13 @@ task.spawn(function()
         end
 
         local localRoot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        ScreenCenter = GetTrueScreenCenter()
 
-        -- ==================== MOTOR ISOLADO: CORE RAGE ENGINE DISPARADOR ====================
+        -- MOTOR CORE RAGE FILTRADO POR FOV
         if Settings.RageEnabled and localRoot then
+            local bestRageScore = math_huge
             local closestRageTarget = nil
-            local minRageDist = Settings.RageMaxDistance
+            local allowedRageRadius = CalculateAngularRadius(Settings.FovDegrees)
 
             for _, char in ipairs(ActiveTargets) do
                 if validateCharacter(char) then
@@ -918,18 +960,28 @@ task.spawn(function()
                         local rPart = char:FindFirstChild(Settings.RageHitbox)
                         if rPart and rPart:IsA("BasePart") then
                             local d3D = (rPart.Position - localRoot.Position).Magnitude
-                            if d3D < minRageDist then
-                                local isRageVisible = true
-                                if Settings.RageWallCheck then
-                                    UpdateIgnoreList()
-                                    local rayResult = Workspace:Raycast(Camera.CFrame.Position, rPart.Position - Camera.CFrame.Position, WALL_CHECK_PARAMS)
-                                    if rayResult and not rayResult.Instance:IsDescendantOf(char) then
-                                        isRageVisible = false
+                            if d3D < Settings.RageMaxDistance then
+                                local screenPos, onScreen = WorldToViewportPoint(Camera, rPart.Position)
+                                if onScreen then
+                                    local pixelDist = (Vector2_new(screenPos.X, screenPos.Y) - ScreenCenter).Magnitude
+                                    if pixelDist <= allowedRageRadius then
+                                        local isRageVisible = true
+                                        if Settings.RageWallCheck then
+                                            UpdateIgnoreList()
+                                            local rayResult = Workspace:Raycast(Camera.CFrame.Position, rPart.Position - Camera.CFrame.Position, WALL_CHECK_PARAMS)
+                                            if rayResult and not rayResult.Instance:IsDescendantOf(char) then
+                                                isRageVisible = false
+                                            end
+                                        end
+                                        
+                                        if isRageVisible then
+                                            local score = pixelDist + (d3D * 0.1)
+                                            if score < bestRageScore then
+                                                bestRageScore = score
+                                                closestRageTarget = rPart
+                                            end
+                                        end
                                     end
-                                end
-                                if isRageVisible then
-                                    minRageDist = d3D
-                                    closestRageTarget = rPart
                                 end
                             end
                         end
@@ -942,9 +994,8 @@ task.spawn(function()
         end
 
         -- MOTOR CONVENCIONAL DE PREDIÇÃO E AIMBOT
-        if (Settings.AimbotEnabled or Settings.FlickEnabled) and EscapeCooldown <= 0 then
-            ScreenCenter = GetTrueScreenCenter()
-            local bestScore, selectedPlayer, selectedPart, ignoreScan = math.huge, nil, nil, false
+        if not Settings.RageEnabled and (Settings.AimbotEnabled or Settings.FlickEnabled) and EscapeCooldown <= 0 then
+            local bestScore, selectedPlayer, selectedPart, ignoreScan = math_huge, nil, nil, false
 
             if Settings.StickyLock and CurrentTarget and TargetPart and TargetPart.Parent then
                 if validateCharacter(CurrentTarget.Character) and AdvancedTeamCheck(CurrentTarget) then
@@ -959,17 +1010,12 @@ task.spawn(function()
                     if validateCharacter(char) then
                         local p = Players:GetPlayerFromCharacter(char)
                         if p and AdvancedTeamCheck(p) then
-                            local approxPart = char:FindFirstChild("HumanoidRootPart")
-                            if approxPart and localRoot and (approxPart.Position - localRoot.Position).Magnitude > 600 then
-                                continue
-                            end
-
                             local exp = ScanDynamicExposedMassa(char)
                             if exp and exp.Parent then
-                                TargetMotionCache[tostring(exp) .. "_" .. tostring(char)] = { lastVelocity = exp.AssemblyLinearVelocity or Vector3.zero, lastUpdate = os.clock() }
-                                local screenPos, onScreen = Camera:WorldToViewportPoint(exp.Position)
+                                TargetMotionCache[tostring(exp) .. "_" .. tostring(char)] = { lastVelocity = exp.AssemblyLinearVelocity or Vector3_zero, lastUpdate = os_clock() }
+                                local screenPos, onScreen = WorldToViewportPoint(Camera, exp.Position)
                                 if onScreen then
-                                    local mDist = (Vector2.new(screenPos.X, screenPos.Y) - ScreenCenter).Magnitude
+                                    local mDist = (Vector2_new(screenPos.X, screenPos.Y) - ScreenCenter).Magnitude
                                     if mDist <= radius then
                                         local score = Settings.TargetPriority == "Distancia FOV" and mDist or (localRoot and (exp.Position - localRoot.Position).Magnitude or mDist)
                                         if score < bestScore then bestScore = score; selectedPlayer = p; selectedPart = exp end
@@ -988,7 +1034,7 @@ end)
 
 -- ==================== LAÇO DE RENDERIZAÇÃO PRINCIPAL (HEARTBEAT) ====================
 AddConnection(RunService.Heartbeat:Connect(function(dt)
-    dt = math.clamp(dt, 0.001, 0.033)
+    dt = clamp(dt, 0.001, 0.033)
     ScreenCenter = GetTrueScreenCenter()
 
     if EscapeCooldown > 0 then EscapeCooldown = math.max(EscapeCooldown - dt, 0) end
@@ -1017,44 +1063,38 @@ AddConnection(RunService.Heartbeat:Connect(function(dt)
     end
     if CrosshairBase then CrosshairBase.Position = UDim2.new(0, ScreenCenter.X, 0, ScreenCenter.Y) end
 
-    -- ==================== PIPELINE EXECUTION: CORE RAGE MASTER UPGRADE ====================
+    -- EXECUÇÃO DO CORE RAGE EM TEMPO REAL
     if Settings.RageEnabled and CoreRageTarget and CoreRageTarget.Parent then
-        -- 1. Filtro Kalman atuando sobre a posição do osso alvo
-        local rawTargetPos = CoreRageTarget.Position
         local filteredTargetPos = ProcessKalmanRage(CoreRageTarget)
-        
-        local targetCFrame = CFrame.new(Camera.CFrame.Position, filteredTargetPos)
+        local targetCFrame = CFrame_new(Camera.CFrame.Position, filteredTargetPos)
         
         if Settings.RageInstantSnapping then
             Camera.CFrame = targetCFrame
         else
-            -- 2. Sistema Quaternião Slerp nativo + Vetor de Arrasto Hidrodinâmico
             local camRot = Camera.CFrame.Rotation
             local targetRot = targetCFrame.Rotation
             
-            -- Fatores de aceleração de fluido baseado na suavidade configurada
             local smoothnessFactor = math.max(Settings.RageSmoothness, 1.0)
-            local fluidFriction = 0.18 / smoothnessFactor
+            local fluidFriction = Settings.RageUseFriction and (0.18 / smoothnessFactor) or (1.0 / smoothnessFactor)
             
-            -- 3. Interpolação por Curva de Bézier Angular Cúbica Dinâmica
-            local angleDiff = math.acos(math.clamp(Camera.CFrame.LookVector:Dot((filteredTargetPos - Camera.CFrame.Position).Unit), -1, 1))
-            local bezierT = math.clamp(1.0 - (angleDiff / math.pi), 0.1, 1.0)
-            -- Curva suavizadora estrutural s(t)
-            local smoothT = GetBezierPoint(Vector3.new(0,0,0), Vector3.new(0.4, 0.8, 0), Vector3.new(1,1,0), bezierT).X
+            local smoothT = 1.0
+            if Settings.RageUseBezier then
+                local angleDiff = math_acos(clamp(Camera.CFrame.LookVector:Dot((filteredTargetPos - Camera.CFrame.Position).Unit), -1, 1))
+                local bezierT = clamp(1.0 - (angleDiff / math.pi), 0.1, 1.0)
+                smoothT = GetBezierPoint(Vector3.new(0,0,0), Vector3.new(0.4, 0.8, 0), Vector3.new(1,1,0), bezierT).X
+            end
             
-            local finalAlpha = math.clamp(fluidFriction * smoothT * (dt * 60), 0.01, 0.95)
-            
-            -- Executa o Slerp Quaternião via Lerp nativo de CFrame de Rotação Pura
-            Camera.CFrame = CFrame.new(Camera.CFrame.Position) * camRot:Lerp(targetRot, finalAlpha)
+            local finalAlpha = clamp(fluidFriction * smoothT * (dt * 60), 0.01, 0.95)
+            Camera.CFrame = CFrame_new(Camera.CFrame.Position) * camRot:Lerp(targetRot, finalAlpha)
         end
         return
     end
 
-    -- SISTEMA ORIGINAL DE TRAVAMENTO E LERPS DO AIMBOT CONVENCIONAL
+    -- SISTEMA DE AIMBOT CONVENCIONAL REESTRUTURADO
     if (Settings.AimbotEnabled or Settings.FlickEnabled) and CurrentTarget and TargetPart and TargetPart.Parent and validateCharacter(CurrentTarget.Character) and EscapeCooldown <= 0 then
         if myRoot then
-            local targetWorldPos = Settings.MovementPrediction and CalculateAdvancedPrediction(TargetPart, dt) or TargetPart.Position
-            local screenPos, onScreen = Camera:WorldToViewportPoint(targetWorldPos)
+            local targetWorldPos = CalculateAdvancedPrediction(TargetPart, dt)
+            local screenPos, onScreen = WorldToViewportPoint(Camera, targetWorldPos)
             if onScreen then
                 if Settings.SnapMarkers then
                     SnapLeft.Visible = true; SnapRight.Visible = true
@@ -1062,47 +1102,47 @@ AddConnection(RunService.Heartbeat:Connect(function(dt)
                     SnapRight.Position = UDim2.new(0, screenPos.X + 8, 0, screenPos.Y - 14)
                 else SnapLeft.Visible = false; SnapRight.Visible = false end
 
-                local targetCFrame = CFrame.new(Camera.CFrame.Position, targetWorldPos)
+                local targetCFrame = CFrame_new(Camera.CFrame.Position, targetWorldPos)
                 local alpha = 0
                 local isFlickPuxando = false
 
                 if FlickActiveThisFrame and Settings.FlickEnabled then
-                    local elapsed = os.clock() - LastFlickTime
+                    local elapsed = os_clock() - LastFlickTime
                     if elapsed < 0.1 then
                         isFlickPuxando = true
-                        alpha = math.clamp(1.0 / math.max(Settings.FlickSmooth, 1), 0.1, 1.0) * (1.0 - (elapsed / 0.1))
+                        alpha = clamp(1.0 / math.max(Settings.FlickSmooth, 1), 0.1, 1.0) * (1.0 - (elapsed / 0.1))
                         if alpha > 0.88 then Camera.CFrame = targetCFrame; FlickActiveThisFrame = false; return end
                     else FlickActiveThisFrame = false end
                 end
 
                 if not isFlickPuxando and Settings.AimbotEnabled then
-                    local mDist = (Vector2.new(screenPos.X, screenPos.Y) - ScreenCenter).Magnitude
+                    local mDist = (Vector2_new(screenPos.X, screenPos.Y) - ScreenCenter).Magnitude
                     if mDist <= ComputedPixelRadius or Settings.StickyLock then
                         local baseSmooth = Settings.SmoothValue
-                        if Settings.DynamicSmoothness then baseSmooth = Settings.SmoothValue * (1.0 + (math.clamp((targetWorldPos - myRoot.Position).Magnitude / 50, 0.5, 4.0) * (Settings.DynamicSmoothMultiplier / 10))) end
-                        alpha = (1 / math.max(baseSmooth, 1)) * math.exp(-math.pow(math.clamp(mDist / ComputedPixelRadius, 0, 1), 2) / 0.405) * (Settings.StickyStrength / 100)
+                        if Settings.DynamicSmoothness then baseSmooth = Settings.SmoothValue * (1.0 + (clamp((targetWorldPos - myRoot.Position).Magnitude / 50, 0.5, 4.0) * (Settings.DynamicSmoothMultiplier / 10))) end
+                        alpha = (1 / math.max(baseSmooth, 1)) * math_exp(-math_pow(clamp(mDist / ComputedPixelRadius, 0, 1), 2) / 0.405) * (Settings.StickyStrength / 100)
 
                         if Settings.MagneticVectorSnapping and alpha > 0.001 then
-                            local pull = math.pow(1 - math.clamp(mDist / ComputedPixelRadius, 0, 1), Settings.GravitationalExponent) * 0.6
-                            if pull > 0.05 then targetCFrame = CFrame.new(Camera.CFrame.Position, Camera.CFrame.Position + Camera.CFrame.LookVector:Lerp((targetWorldPos - Camera.CFrame.Position).Unit, math.min(pull * 1.5, 0.9))) end
+                            local pull = math_pow(1 - clamp(mDist / ComputedPixelRadius, 0, 1), Settings.GravitationalExponent) * 0.6
+                            if pull > 0.05 then targetCFrame = CFrame_new(Camera.CFrame.Position, Camera.CFrame.Position + Camera.CFrame.LookVector:Lerp((targetWorldPos - Camera.CFrame.Position).Unit, math.min(pull * 1.5, 0.9))) end
                         end
                         if Settings.HumanFriction then
                             local parentModel = TargetPart.Parent
                             if parentModel then
                                 local motion = TargetMotionCache[tostring(TargetPart) .. "_" .. tostring(parentModel)]
-                                if motion then alpha = alpha * (1.0 - math.clamp(motion.lastVelocity.Magnitude / 75, 0, 0.25)) end
+                                if motion then alpha = alpha * (1.0 - clamp(motion.lastVelocity.Magnitude / 75, 0, 0.25)) end
                             end
                         end
-                        if Settings.ProximityDampEnabled then alpha = alpha * math.clamp(((targetWorldPos - myRoot.Position).Magnitude - 6) / (Settings.ProximityMaxDistance - 6), Settings.ProximityMinStrength / 100, 1.0) end
+                        if Settings.ProximityDampEnabled then alpha = alpha * clamp(((targetWorldPos - myRoot.Position).Magnitude - 6) / (Settings.ProximityMaxDistance - 6), Settings.ProximityMinStrength / 100, 1.0) end
                         alpha = alpha * DynamicUserWeight
                     end
                 end
 
-                alpha = math.clamp(alpha, 0.0, 0.92)
+                alpha = clamp(alpha, 0.0, 0.92)
                 if alpha > 0.005 then
                     if Settings.NeuromuscularTremor then
-                        local time = os.clock(); local freq = 15.7 + (Settings.TremorIntensity * 0.3); local amp = (Settings.TremorIntensity / 2200) * (1.0 - (os.clock() % 2.5) / 5.0)
-                        targetCFrame = targetCFrame * CFrame.Angles((math.sin(time * freq + 2.3) * 0.7) * amp, (math.cos(time * (freq * 1.3) + 1.7) * 0.6) * amp, 0)
+                        local time = os_clock(); local freq = 15.7 + (Settings.TremorIntensity * 0.3); local amp = (Settings.TremorIntensity / 2200) * (1.0 - (os_clock() % 2.5) / 5.0)
+                        targetCFrame = targetCFrame * CFrame_Angles((math_sin(time * freq + 2.3) * 0.7) * amp, (math_cos(time * (freq * 1.3) + 1.7) * 0.6) * amp, 0)
                     end
                     Camera.CFrame = Camera.CFrame:Lerp(targetCFrame, alpha)
                 end
@@ -1112,4 +1152,4 @@ AddConnection(RunService.Heartbeat:Connect(function(dt)
     TouchVelocity2D = 0; if not Settings.FlickEnabled then FlickActiveThisFrame = false end
 end))
 
-print("[PREMONITION ENGINE] Core Rage Master v2 Injetado com Sucesso!")
+print("[PREMONITION ENGINE] Versão v109.0.0 Refatorada e Otimizada com Sucesso!")
